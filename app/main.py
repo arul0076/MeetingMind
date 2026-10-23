@@ -2,6 +2,7 @@
 import os
 import re
 import tiktoken
+from typing import Literal
 from uuid import uuid4
 from datetime import date
 from pathlib import Path
@@ -12,9 +13,13 @@ from pydantic import BaseModel, Field
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from app.loaders import load_database, load_turns
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
 ENCODING = tiktoken.get_encoding("cl100k_base")
 MAX_EVIDENCE_TOKENS = 2600
@@ -49,8 +54,62 @@ class AskRequest(BaseModel):
     as_of: date | None = None
 
 
+class GroundedAnswer(BaseModel):
+    route: Literal["answer", "no_answer"]
+    answer: str
+    evidence_indices: list[int]
+
+
 def words(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def ask_gemini(question: str, evidence: list[dict]) -> GroundedAnswer:
+    evidence_text = "\n".join(
+        "[{}] {} {} {}: {}".format(
+            index,
+            turn["meeting_date"],
+            turn["timestamp"],
+            turn["speaker"],
+            turn["text"],
+        )
+        for index, turn in enumerate(evidence)
+    )
+    prompt = f"""You are MeetingMind. Answer only from the supplied evidence.
+
+Return route=no_answer when the evidence does not answer the question. For no_answer,
+say the available meeting records do not cover the answer and suggest asking the meeting
+owner. Use an empty evidence_indices list.
+
+For route=answer, cite only the zero-based evidence indices that directly support the
+answer. Treat settled language such as 'decision', 'we go with', or 'is set to' as a
+decision. Treat 'maybe', 'what if', or 'let's revisit' as a proposal, not a decision.
+When a later decision explicitly reverses an earlier decision, the later decision wins.
+For decision-history questions, list decisions chronologically.
+
+Question: {question}
+
+Evidence:
+{evidence_text}
+"""
+    client = genai.Client(
+        api_key=os.environ["GEMINI_API_KEY"],
+        http_options=types.HttpOptions(
+            timeout=30000,
+            client_args={"trust_env": False},
+        ),
+    )
+    response = client.models.generate_content(
+        model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0,
+            max_output_tokens=500,
+            response_mime_type="application/json",
+            response_schema=GroundedAnswer,
+        ),
+    )
+    return GroundedAnswer.model_validate_json(response.text)
 
 
 @app.get("/health")
@@ -168,23 +227,33 @@ def ask(request: AskRequest):
         route = "no_answer"
         citations = []
     else:
-        answer = (
-            "I found potentially relevant meeting statements, but this "
-            "basic retrieval version does not yet synthesize an answer:\n"
-            + "\n".join(
-                f'{t["meeting_date"]} — {t["speaker_raw"]}: {t["text"]}'
-                for t in selected
-            )
-        )
-        route = "answer"
-        citations = [
+        model_answer = ask_gemini(request.question, selected)
+        evidence_indices = sorted(
             {
-                "meeting_id": t["meeting_id"],
-                "timestamp": t["timestamp"],
-                "speaker": t["speaker"],
+                index
+                for index in model_answer.evidence_indices
+                if 0 <= index < len(selected)
             }
-            for t in selected
-        ]
+        )
+
+        if model_answer.route == "answer" and evidence_indices:
+            answer = model_answer.answer
+            route = "answer"
+            citations = [
+                {
+                    "meeting_id": selected[index]["meeting_id"],
+                    "timestamp": selected[index]["timestamp"],
+                    "speaker": selected[index]["speaker"],
+                }
+                for index in evidence_indices
+            ]
+        else:
+            answer = (
+                "The available meeting records do not provide enough evidence "
+                "to answer this question. Consider asking the meeting owner."
+            )
+            route = "no_answer"
+            citations = []
 
     return {
         "request_id": str(uuid4()),
