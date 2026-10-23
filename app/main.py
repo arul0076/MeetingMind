@@ -1,6 +1,7 @@
 
 import os
 import re
+import tiktoken
 from uuid import uuid4
 from datetime import date
 from pathlib import Path
@@ -15,6 +16,8 @@ from app.loaders import load_database, load_turns
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+ENCODING = tiktoken.get_encoding("cl100k_base")
+MAX_EVIDENCE_TOKENS = 2600
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -140,7 +143,21 @@ def ask(request: AskRequest):
         )
     )
 
-    selected = [turn for _, turn in ranked[:5]]
+    selected = []
+    used_tokens = 0
+
+    for _, turn in ranked:
+        turn_tokens = len(ENCODING.encode(turn["text"]))
+        if used_tokens + turn_tokens > MAX_EVIDENCE_TOKENS:
+            continue
+
+        selected.append(turn)
+        used_tokens += turn_tokens
+
+        if len(selected) == 5:
+            break
+
+    selected.sort(key=lambda t: (t["meeting_date"], t["start_seconds"]))    
 
 
     if not selected:
