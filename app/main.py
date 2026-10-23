@@ -66,6 +66,24 @@ def ask(request: AskRequest):
     if request.speaker and request.speaker not in app.state.speaker_ids:
         raise HTTPException(status_code=400, detail="Unknown speaker ID")
 
+    if any(
+        phrase in request.question.lower()
+        for phrase in ("write an email", "draft an email", "send an email", "summarize", "summary")
+    ):
+        return {
+            "request_id": str(uuid4()),
+            "answer": "I can only answer questions about what was said in the meetings.",
+            "route": "out_of_scope",
+            "citations": [],
+            "filters": {
+                "project": request.project,
+                "speaker": request.speaker,
+                "date_from": request.date_from.isoformat() if request.date_from else None,
+                "date_to": request.date_to.isoformat() if request.date_to else None,
+            },
+            "reference_date": reference_date.isoformat(),
+        }
+            
     turns = app.state.turns
     question_words = words(request.question) - {
         "what", "when", "where", "who", "why", "how",
