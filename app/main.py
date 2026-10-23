@@ -128,6 +128,12 @@ def ask(request: AskRequest):
     if request.speaker and request.speaker not in app.state.speaker_ids:
         raise HTTPException(status_code=400, detail="Unknown speaker ID")
 
+    if request.date_from and request.date_to and request.date_from > request.date_to:
+        raise HTTPException(
+            status_code=400,
+            detail="date_from must be on or before date_to",
+        )
+
     if any(
         phrase in request.question.lower()
         for phrase in ("write an email", "draft an email", "send an email", "summarize", "summary")
