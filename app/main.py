@@ -69,11 +69,36 @@ def ask(request: AskRequest):
         and turn["meeting_date"] <= reference_date.isoformat()
     ]
 
-    ranked = []
+
+    # Count how many filtered turns contain each word.
+    # Words found in fewer turns will receive more weight.
+    document_frequency = {}
     for turn in filtered:
-        overlap = len(question_words & words(turn["text"]))
-        if overlap:
-            ranked.append((overlap, turn))
+        turn_words = words(turn["text"])
+        for word in question_words & turn_words:
+            document_frequency[word] = document_frequency.get(word, 0) + 1
+
+    ranked = []
+    question_phrase = " ".join(words(request.question))
+
+    for turn in filtered:
+        turn_words = words(turn["text"])
+        matching_words = question_words & turn_words
+
+        if not matching_words:
+            continue
+
+        # Give more points to specific words that occur less often.
+        score = sum(
+            1 / document_frequency[word]
+            for word in matching_words
+        )
+
+        # Small bonus when the question's meaningful words all appear.
+        if question_words and question_words.issubset(turn_words):
+            score += 1
+
+        ranked.append((score, turn))
 
     ranked.sort(
         key=lambda item: (
@@ -82,7 +107,9 @@ def ask(request: AskRequest):
             item[1]["start_seconds"],
         )
     )
+
     selected = [turn for _, turn in ranked[:5]]
+
 
     if not selected:
         answer = (
@@ -104,12 +131,8 @@ def ask(request: AskRequest):
         citations = [
             {
                 "meeting_id": t["meeting_id"],
-                "meeting_date": t["meeting_date"],
-                "meeting_title": t["meeting_title"],
                 "timestamp": t["timestamp"],
                 "speaker": t["speaker"],
-                "turn_id": t["turn_id"],
-                "text": t["text"],
             }
             for t in selected
         ]
