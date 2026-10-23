@@ -41,6 +41,8 @@ def load_turns(transcripts_dir: Path, manifest_path: Path, db_path: Path) -> lis
                 merged
                 and merged[-1]["speaker"] == speaker_id
                 and speaker_id is not None
+                and "end_seconds" in merged[-1]
+                and "end_seconds" in current
                 and previous_end is not None
                 and current["start_seconds"] - previous_end <= 2.0):
                 merged[-1]["text"] = (
