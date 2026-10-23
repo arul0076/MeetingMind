@@ -66,12 +66,13 @@ def parse_srt(path: Path) -> list[dict[str, Any]]:
         if timing_index is None:
             continue
         start = timestamp_to_seconds(lines[timing_index].split("-->")[0])
+        end = timestamp_to_seconds(lines[timing_index].split("-->")[1].strip().split()[0])
         body = " ".join(lines[timing_index+1:])
         # Expected form in this task: SPEAKER: spoken text.
         match = re.match(r"([^:]{1,80}):\s*(.*)", body)
         speaker, text = (match.group(1).strip(), match.group(2).strip()) if match else ("", body)
         if text:
-            segments.append({"start_seconds": start, "timestamp": seconds_to_timestamp(start),
+            segments.append({"start_seconds": start,"end_seconds": end, "timestamp": seconds_to_timestamp(start),
                              "speaker_raw": speaker, "text": _clean_text(text)})
     return segments
 
@@ -95,7 +96,8 @@ def parse_json(path: Path) -> list[dict[str, Any]]:
     segments = []
     for item in payload.get("segments", []):
         start = float(item.get("start_ms", 0)) / 1000
-        segments.append({"start_seconds": start, "timestamp": seconds_to_timestamp(start),
+        end = float(item.get("end_ms", item.get("start_ms", 0))) / 1000
+        segments.append({"start_seconds": start, "end_seconds": end, "timestamp": seconds_to_timestamp(start),
                          "speaker_raw": str(item.get("spk", "")),
                          "text": _clean_text(str(item.get("content", "")))})
     return [x for x in segments if x["text"]]
