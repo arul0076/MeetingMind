@@ -3,4 +3,4 @@ uvicorn
 pydantic
 python-dotenv
 tiktoken
-openai
+google-genai
