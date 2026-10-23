@@ -6,10 +6,10 @@ from datetime import date
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from app.loaders import load_turns
+from app.loaders import load_database, load_turns
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -22,8 +22,12 @@ async def lifespan(app: FastAPI):
         BASE_DIR / os.getenv("MANIFEST_PATH", "data/manifest.json"),
         BASE_DIR / os.getenv("DB_PATH", "data/orbit.db"),
     )
+    people, projects = load_database(
+        BASE_DIR / os.getenv("DB_PATH", "data/orbit.db")
+    )
+    app.state.project_ids = {row[0] for row in projects}
+    app.state.speaker_ids = {row[0] for row in people}
     yield
-
 
 app = FastAPI(title="MeetingMind API", lifespan=lifespan)
 
@@ -51,6 +55,11 @@ def ask(request: AskRequest):
     reference_date = request.as_of or date.fromisoformat(
         os.getenv("APP_TODAY", "2026-07-01")
     )
+    if request.project and request.project not in app.state.project_ids:
+        raise HTTPException(status_code=400, detail="Unknown project ID")
+
+    if request.speaker and request.speaker not in app.state.speaker_ids:
+        raise HTTPException(status_code=400, detail="Unknown speaker ID")
 
     turns = app.state.turns
     question_words = words(request.question) - {
