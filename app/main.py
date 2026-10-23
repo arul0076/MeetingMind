@@ -8,7 +8,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from app.loaders import load_database, load_turns
 
 
@@ -30,6 +31,10 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(title="MeetingMind API", lifespan=lifespan)
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request, exc):
+    return JSONResponse(status_code=400, content={"detail": exc.errors()})
 
 
 class AskRequest(BaseModel):
