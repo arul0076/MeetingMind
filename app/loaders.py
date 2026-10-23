@@ -35,12 +35,27 @@ def load_turns(transcripts_dir: Path, manifest_path: Path, db_path: Path) -> lis
         for seg in segments:
             speaker_id = resolve_speaker(seg["speaker_raw"], speaker_lookup)
             current = {**seg, "speaker": speaker_id}
-            if (merged and merged[-1]["speaker"] == speaker_id and speaker_id is not None
-                    and current["start_seconds"] - merged[-1]["last_end_seconds"] <= 2.0):
-                merged[-1]["text"] = (merged[-1]["text"] + " " + current["text"]).strip()
-                merged[-1]["last_end_seconds"] = current["start_seconds"]
+            previous_end = merged[-1]["last_end_seconds"] if merged else None
+
+            if (
+                merged
+                and merged[-1]["speaker"] == speaker_id
+                and speaker_id is not None
+                and previous_end is not None
+                and current["start_seconds"] - previous_end <= 2.0):
+                merged[-1]["text"] = (
+                    merged[-1]["text"] + " " + current["text"]
+                ).strip()
+                merged[-1]["last_end_seconds"] = current.get(
+                    "end_seconds", current["start_seconds"]
+                )
             else:
-                merged.append({**current, "last_end_seconds": current["start_seconds"]})
+                merged.append({
+                    **current,
+                    "last_end_seconds": current.get(
+                        "end_seconds", current["start_seconds"]
+                    ),
+                })
         for idx, seg in enumerate(merged):
             turns.append({
                 "turn_id": f"{meeting_id}-{idx+1}",
