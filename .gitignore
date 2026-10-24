@@ -4,3 +4,4 @@ __pycache__/
 *.py[cod]
 data/
 .pytest_cache/
+PROJECT_STUDY_GUIDE.md

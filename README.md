@@ -1,100 +1,62 @@
 # MeetingMind
 
-MeetingMind is a FastAPI service for asking grounded questions about team meetings. It reads the supplied transcripts and database at startup, retrieves relevant turns, asks Gemini to answer from that evidence only, and returns verifiable source citations.
+MeetingMind is a FastAPI service that answers questions about meeting transcripts and returns source citations. It was built for the MeetingMind Junior AI Developer assessment.
 
-It is built for the MeetingMind Junior AI Developer assessment. No transcript fact is hardcoded, so the same code works when the assessment data is replaced with another folder that has the same structure.
+The service loads the supplied transcript files and SQLite database at startup, retrieves relevant meeting turns, asks Gemini to answer only from that evidence, and builds citations in Python. No meeting fact is hardcoded, so replacement assessment data with the same layout can be used without changing the application.
 
-## What it does
+## Features
 
-- Answers questions such as “What pricing decision was made?” and “How did the Pro tier price change?”
-- Returns citations containing `meeting_id`, turn start `timestamp`, and `speaker` ID.
-- Returns `no_answer` instead of guessing when the records do not cover a question.
-- Returns `out_of_scope` for non-meeting requests such as drafting an email.
-- Supports project, speaker, date range, and `as_of` filters.
+- Parses VTT, SRT, TXT, and JSON transcript exports.
+- Resolves speaker names and aliases case- and accent-insensitively.
+- Handles duplicate meeting exports, using the first successfully parsed copy.
+- Merges only adjacent timed captions from the same resolved speaker.
+- Filters by project, speaker, date range, and an `as_of` reference date before retrieval.
+- Returns `answer`, `no_answer`, or `out_of_scope` with grounded citations.
+- Sends fewer than 3,000 transcript tokens to Gemini per request.
 
-## Technology
-
-| Tool | Purpose |
-| --- | --- |
-| Python 3.10+ | Application language |
-| FastAPI | Web API and interactive Swagger documentation |
-| SQLite | Supplied people and projects database |
-| Pydantic | Request and Gemini response validation |
-| Google Gemini API | Evidence-grounded answer generation |
-| `google-genai` | Gemini Python SDK |
-| `tiktoken` | Required `cl100k_base` token counting |
-| `python-dotenv` | Loads local environment settings and API key |
-
-## Project structure
+## Architecture
 
 ```text
-meetingmind/
-├── app/
-│   ├── main.py            # API, validation, retrieval, Gemini call
-│   ├── parsers.py         # VTT, SRT, TXT, JSON parsers
-│   ├── loaders.py         # DB/manifest loading and turn construction
-│   ├── normalization.py   # Speaker and alias matching
-│   └── __init__.py
-├── data/                  # Local assessment files; intentionally not committed
-├── .env.example           # Safe configuration template
-├── requirements.txt
-└── README.md
+HTTP request
+  -> validate request and filters
+  -> load eligible transcript turns
+  -> keyword ranking with per-meeting coverage
+  -> token-capped evidence block (maximum 2,600 tokens)
+  -> Gemini structured response
+  -> Python validates evidence indexes and creates citations
+  -> JSON response
 ```
 
-## Architecture and data flow
+### Startup and data loading
 
-### 1. Startup loading
+`app/loaders.py` reads `manifest.json`, `orbit.db`, and the transcript files. Parsed content becomes normalized turns with meeting metadata, a start timestamp, resolved speaker ID, and text. A duplicate manifest entry for the same meeting ID is skipped only after an earlier export has parsed successfully; a broken first export therefore does not block a usable fallback copy.
 
-Before accepting requests, FastAPI reads `manifest.json`, `orbit.db`, and every transcript named by the manifest. Normalized turns and valid project/speaker IDs are retained in application state.
+### Parsing and turn merging
 
-### 2. Transcript parsing and speaker resolution
+`app/parsers.py` supports VTT, SRT, TXT, and JSON. Timed formats retain start and end values. `app/loaders.py` merges adjacent captions only when both have the same resolved speaker and the next caption begins within two seconds of the previous caption ending. Untimed TXT lines are not merged.
 
-The project has a parser for each source format: VTT, SRT, TXT, and JSON. Timed VTT, SRT, and JSON captions preserve start and end times. Adjacent captions are merged only when they are from the same resolved speaker and the next cue begins within two seconds of the previous cue ending. TXT has no end time, so its lines are not merged.
+### Speaker resolution
 
-Speaker text is normalized by lowercasing and removing accents before matching `full_name` and aliases from SQLite. If a meeting has two exports, only the first manifest entry for that `meeting_id` is used, preventing duplicate retrieval and citations.
+`app/normalization.py` removes case, accent, punctuation, and whitespace differences before matching database full names and aliases. If an alias maps to several people, meeting attendees may break the tie; otherwise the speaker remains unresolved. The service logs this instead of silently assigning a potentially incorrect citation.
 
-### 3. Request validation and filtering
+### Retrieval and grounding
 
-The service validates missing/blank questions, malformed dates, reversed date ranges, and unknown project or speaker IDs. Invalid requests return HTTP 400.
+All filters are applied in Python before retrieval and before the LLM sees evidence. The transparent retriever ranks overlapping question terms, gives a modest boost to decision/proposal language, preserves up to two strong matches per meeting, and adds the following turn as useful context. Evidence is sorted chronologically.
 
-Python applies all filters before retrieval and before Gemini sees any evidence:
+Gemini receives the question plus indexed evidence only. It returns structured JSON with a route, answer, and evidence indexes. Python validates every index, de-duplicates and chronologically orders citations, and maps them to trusted local `meeting_id`, `timestamp`, and `speaker` fields. The model never invents citation metadata.
 
-- `project`: project ID to include
-- `speaker`: person ID to include
-- `date_from`, `date_to`: inclusive meeting-date range
-- `as_of`: excludes meetings held after this reference date
+## Requirements
 
-When `as_of` is omitted, `APP_TODAY` defaults to `2026-07-01`; the computer clock is not used.
-
-### 4. Retrieval
-
-MeetingMind uses a transparent keyword retriever. It removes common question words, finds overlapping terms in filtered transcript turns, and weights rarer matching words more strongly. Selected turns are then sorted by meeting date and timestamp so Gemini sees decision history chronologically.
-
-### 5. Token limit
-
-The assessment limit is fewer than 3,000 transcript tokens per LLM call. `tiktoken` with `cl100k_base` counts selected turn text, and MeetingMind stops at 2,600 tokens. This leaves headroom while ensuring the transcript evidence stays below the limit.
-
-### 6. Grounded Gemini answer
-
-Gemini receives only the question and numbered evidence turns. The prompt requires it to:
-
-- use only the supplied evidence;
-- distinguish proposals from settled decisions;
-- prefer a later decision if it explicitly reverses an earlier one;
-- list decision history chronologically;
-- return `no_answer` when evidence is insufficient.
-
-Gemini returns structured JSON containing `route`, `answer`, and `evidence_indices`. Python validates these indices and constructs final citations from trusted local metadata. The model never creates meeting IDs, timestamps, or speaker IDs itself.
+- Python 3.10 or newer
+- A Google Gemini API key (a free-tier key is sufficient for normal testing)
+- Local assessment data in `data/`:
+  - `data/manifest.json`
+  - `data/orbit.db`
+  - `data/transcripts/`
 
 ## Setup
 
-### Prerequisites
-
-- Python 3.10 or newer
-- A Gemini API key (the Gemini free tier is suitable for this project)
-- The assessment `data/` folder available locally
-
-### Install on Windows PowerShell
+### Windows PowerShell
 
 ```powershell
 python -m venv .venv
@@ -103,137 +65,145 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Open `.env` and add your secret key:
+### macOS / Linux
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Open `.env` and set your key. `GOOGLE_API_KEY` is the primary variable; `GEMINI_API_KEY` remains a compatibility fallback.
 
 ```text
-GEMINI_API_KEY=your_key_here
+GOOGLE_API_KEY=your_key_here
+GEMINI_MODEL=gemini-3.5-flash-lite
 ```
 
-Never commit `.env`, real API keys, or `data/`.
+Never commit `.env`, API keys, or the supplied `data/` files.
 
-### Configuration
+## Configuration
 
-| Variable | Default | Meaning |
+| Variable | Default | Purpose |
 | --- | --- | --- |
-| `TRANSCRIPTS_DIR` | `./data/transcripts` | Transcript directory |
-| `MANIFEST_PATH` | `./data/manifest.json` | Transcript metadata |
-| `DB_PATH` | `./data/orbit.db` | SQLite database |
-| `APP_TODAY` | `2026-07-01` | Default reference date |
-| `LLM_PROVIDER` | `gemini` | Provider setting |
-| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Model used for answer generation |
-| `GEMINI_API_KEY` | none | Gemini API key |
+| `TRANSCRIPTS_DIR` | `./data/transcripts` | Transcript folder |
+| `MANIFEST_PATH` | `./data/manifest.json` | Transcript manifest |
+| `DB_PATH` | `./data/orbit.db` | People and projects database |
+| `APP_TODAY` | `2026-07-01` | Default reference date when `as_of` is absent |
+| `LLM_PROVIDER` | `gemini` | Informational setting; Gemini is the supported provider |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Gemini model name |
+| `GOOGLE_API_KEY` | none | Primary Gemini API key |
+| `GEMINI_API_KEY` | none | Compatibility fallback key |
+| `PORT` | `8000` | HTTP port for `python main.py` |
 
-### Run
+If `LLM_PROVIDER` has another value, the application logs a warning and still uses Gemini. It is not a multi-provider implementation.
+
+## Run
+
+Recommended command:
 
 ```powershell
-python -m uvicorn app.main:app --reload
+python main.py
 ```
 
-Open `http://127.0.0.1:8000/docs` for Swagger UI.
+Development reload command:
+
+```powershell
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) for the interactive API documentation.
 
 ## API
 
-### Health
-
-```http
-GET /health
-```
+### `GET /health`
 
 ```json
-{"status": "ok"}
+{"status":"ok"}
 ```
 
-### Ask a question
+### `POST /ask`
 
-```http
-POST /ask
-Content-Type: application/json
-```
+Only `question` is required.
 
 ```json
 {
-  "question": "What was the mobile launch date?",
-  "project": "mobile-app-launch",
-  "as_of": "2026-04-01"
+  "question": "How did the Pro tier price change?",
+  "project": "pricing-v2",
+  "as_of": "2026-07-01"
 }
 ```
 
-Only `question` is required. `project`, `speaker`, `date_from`, `date_to`, and `as_of` may be omitted or set to `null`.
+Optional filters are `project`, `speaker`, `date_from`, `date_to`, and `as_of`. Dates are inclusive. `as_of` excludes meetings after its date; if omitted, `APP_TODAY` is used instead of the computer clock.
 
-Example answer:
+An answer response has exactly these top-level fields:
 
 ```json
 {
-  "request_id": "example-id",
-  "answer": "As of 1 April 2026, the mobile launch was set for 6 May 2026.",
+  "request_id": "uuid",
+  "answer": "The Pro tier was raised to $59 and later reversed to $49.",
   "route": "answer",
   "citations": [
-    {"meeting_id": "m002", "timestamp": "00:03:38", "speaker": "p01"}
+    {"meeting_id": "m003", "timestamp": "00:03:29", "speaker": "p01"},
+    {"meeting_id": "m005", "timestamp": "00:03:54", "speaker": "p01"}
   ],
   "filters": {
-    "project": "mobile-app-launch",
-    "speaker": null,
     "date_from": null,
-    "date_to": null
+    "date_to": null,
+    "project": "pricing-v2",
+    "speaker": null
   },
-  "reference_date": "2026-04-01"
+  "reference_date": "2026-07-01"
 }
 ```
 
-### Routes and errors
-
-| Result | HTTP status | Citations | Meaning |
+| Route | Status | Citations | Meaning |
 | --- | --- | --- | --- |
-| `answer` | 200 | One or more | Evidence supports an answer |
-| `no_answer` | 200 | Empty | Allowed records do not answer the question |
-| `out_of_scope` | 200 | Empty | Request is not about meeting records |
-| Invalid request | 400 | N/A | Invalid JSON, invalid date, blank question, reversed date range, or unknown ID |
+| `answer` | 200 | At least one | Supported by meeting evidence |
+| `no_answer` | 200 | Empty | Relevant records do not cover the answer |
+| `out_of_scope` | 200 | Empty | The request is clearly not a meeting question |
 
-## Tests performed
+HTTP 400 is reserved for invalid JSON, a missing or blank question, an invalid date, or an unknown project/speaker ID. A reversed valid date range is a normal `200 no_answer` response.
 
-| Scenario | Verified behavior |
-| --- | --- |
-| Latest pricing decision | Returned the later $49 Pro-tier reversal with supporting citations |
-| Pricing history | Returned the March $59 decision, then the May $49 reversal |
-| `as_of: 2026-04-01` | Excluded the May reversal and returned only the March decision |
-| Unknown project | HTTP 400 |
-| Invalid date range | HTTP 400 |
-| Office parking policy | `no_answer` and no citations |
-| Draft an email | `out_of_scope` and no citations |
-| `/health` | HTTP 200 and `{"status": "ok"}` |
+## Token and error handling
 
-## Challenges and solutions
+The full formatted evidence block—including labels, timestamps, speakers, and text—is counted with `tiktoken` `cl100k_base` and capped at 2,600 tokens. This is safely below the 3,000-token assessment limit. If the tokenizer is unavailable, a conservative one-token-per-three-characters estimate is used and logged.
 
-### Incomplete caption evidence
+Gemini is called with a 25-second timeout. Missing keys, network failures, rate limits, malformed model output, and other LLM errors are logged but never become a 500 response. The client receives:
 
-Initial VTT evidence ended mid-sentence because only cue start times were stored. The loader compared the next caption start with the previous caption start rather than its end. Adding `end_seconds` to timed parsers and comparing against the prior end time correctly merged sentence fragments.
+```json
+{
+  "answer": "The language model could not be reached. Please try again.",
+  "route": "no_answer",
+  "citations": []
+}
+```
 
-### Stable citations after merging
+## Testing notes
 
-Merging captions changes later internal turn numbers. Tests therefore verify source text and timestamps, rather than depending on unstable intermediate turn IDs.
+Use [MANUAL_TEST_CHECKLIST.md](MANUAL_TEST_CHECKLIST.md) to test health, grounding, decision history, `as_of`, filters, no-answer, out-of-scope, error behavior, loader integrity, and Git safety.
 
-### Safe structured output
+Important expected scenarios:
 
-Plain text model output could return malformed JSON or invented citation metadata. Gemini structured output returns evidence indexes instead. Python maps them to local turns, ensuring citations remain trustworthy.
+- Latest pricing question: March’s $59 decision is later reversed to $49 in May.
+- `as_of: 2026-04-01`: the May reversal is excluded, so the March decision remains current.
+- Office parking policy: `200 no_answer` with no citations.
+- Email drafting: `200 out_of_scope` with no citations.
+- Unknown project/speaker: `400`.
+- Reversed date range: `200 no_answer` with no citations.
 
-### Free-tier model availability
+## Assumptions and limitations
 
-An earlier Gemini model was unavailable to new API users. The configured model is `gemini-3.5-flash-lite`.
+- The manifest, database schema, and transcript layouts follow the supplied assessment data structure.
+- Keyword retrieval is deliberately simple and explainable. Hybrid or embedding retrieval would improve paraphrase recall.
+- A small local phrase check handles only obvious non-meeting requests; Gemini decides the route for all other questions, including when no evidence is retrieved.
+- Gemini availability, model access, and rate limits are controlled by Google.
+- The service supports Gemini only. A real provider abstraction would be needed before adding OpenAI or Anthropic.
+- No automated test suite is included yet; adding `pytest` tests for parsers, filtering, retrieval, and LLM failure handling is the natural next improvement.
 
-### Cost and token control
+## Security and repository hygiene
 
-No Gemini call occurs for out-of-scope requests or requests with no retrieved evidence. For answers, only ranked evidence is sent, and transcript text is capped at 2,600 tokens.
-
-## Limitations and future improvements
-
-- Retrieval is keyword-based; embedding or hybrid retrieval would improve recall for unusual phrasing.
-- Out-of-scope detection uses a small phrase list; an intent classifier would be more complete.
-- Gemini free-tier rate limits and availability are controlled by Google.
-- The current implementation uses Gemini. Supporting OpenAI and Anthropic behind a shared provider interface would make `LLM_PROVIDER` fully interchangeable.
-- Automated tests are not included. Adding `pytest` coverage for parsers, filters, routes, and token limits would improve long-term maintainability.
-
-## Security and submission notes
-
-- `.env`, `.venv/`, cache files, and `data/` are ignored by Git.
-- No real API key or assessment transcript data is included in this repository.
-- All meeting facts come from runtime-loaded source files, never from hardcoded application facts.
+- `.env`, `.venv/`, caches, `data/`, and the personal `PROJECT_STUDY_GUIDE.md` are ignored by Git.
+- No API keys or supplied meeting data belong in commits.
+- The personal study guide can stay on the local machine without becoming part of the submitted repository.
