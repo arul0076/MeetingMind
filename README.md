@@ -180,19 +180,6 @@ Gemini is called with a 25-second timeout. Missing keys, network failures, rate 
 }
 ```
 
-## Testing notes
-
-Use [MANUAL_TEST_CHECKLIST.md](MANUAL_TEST_CHECKLIST.md) to test health, grounding, decision history, `as_of`, filters, no-answer, out-of-scope, error behavior, loader integrity, and Git safety.
-
-Important expected scenarios:
-
-- Latest pricing question: March’s $59 decision is later reversed to $49 in May.
-- `as_of: 2026-04-01`: the May reversal is excluded, so the March decision remains current.
-- Office parking policy: `200 no_answer` with no citations.
-- Email drafting: `200 out_of_scope` with no citations.
-- Unknown project/speaker: `400`.
-- Reversed date range: `200 no_answer` with no citations.
-
 ## Assumptions and limitations
 
 - The manifest, database schema, and transcript layouts follow the supplied assessment data structure.
@@ -202,8 +189,5 @@ Important expected scenarios:
 - The service supports Gemini only. A real provider abstraction would be needed before adding OpenAI or Anthropic.
 - No automated test suite is included yet; adding `pytest` tests for parsers, filtering, retrieval, and LLM failure handling is the natural next improvement.
 
-## Security and repository hygiene
 
-- `.env`, `.venv/`, caches, `data/`, and the personal `PROJECT_STUDY_GUIDE.md` are ignored by Git.
-- No API keys or supplied meeting data belong in commits.
 - The personal study guide can stay on the local machine without becoming part of the submitted repository.
